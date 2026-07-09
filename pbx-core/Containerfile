@@ -1,0 +1,28 @@
+# pbx-core: the drachtio SIP server + your TypeScript intercom logic in one image.
+# The drachtio *server* is the SofiaSIP engine; every routing decision lives in
+# src/ (your code). A tiny supervisor script starts drachtio, then the app.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+COPY package.json tsconfig.json ./
+RUN npm install
+COPY src ./src
+RUN npm run build
+
+FROM docker.io/drachtio/drachtio-server:latest AS drachtio
+# ^ provides /usr/local/bin/drachtio
+
+FROM node:22-bookworm-slim
+WORKDIR /app
+# bring in the drachtio server binary + its runtime deps
+COPY --from=drachtio /usr/local/bin/drachtio /usr/local/bin/drachtio
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libssl3 libcurl4 libboost-system1.74.0 libboost-thread1.74.0 \
+      libboost-log1.74.0 libboost-filesystem1.74.0 libgoogle-perftools4 \
+      libunwind8 && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY drachtio.conf.xml /etc/drachtio.conf.xml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+EXPOSE 5060/udp 5060/tcp 8443/tcp 9022/tcp
+ENTRYPOINT ["/entrypoint.sh"]

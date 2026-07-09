@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Reference config. entrypoint.sh passes equivalent flags; keep this in sync
+     if you switch to `drachtio -f /etc/drachtio.conf.xml`. -->
+<drachtio>
+  <admin port="9022" secret="cymru">0.0.0.0</admin>
+  <sip>
+    <contacts>
+      <contact>sip:*;transport=udp,tcp</contact>
+      <!-- JsSIP endpoints connect over WebSocket. :8088 matches the
+           container-sip-endpoint default (ws://server:8088/ws). -->
+      <contact>sip:*:8088;transport=ws</contact>
+    </contacts>
+    <timers><session-timer>1800</session-timer></timers>
+  </sip>
+  <cdrs>false</cdrs>
+  <logging>
+    <sofia-loglevel>2</sofia-loglevel>
+    <loglevel>info</loglevel>
+  </logging>
+</drachtio>

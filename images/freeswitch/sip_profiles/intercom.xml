@@ -1,0 +1,41 @@
+<!--
+  sip_profiles/intercom.xml — a dedicated SIP profile for the group intercom
+  path, separate from any stock "internal"/"external" profile the image ships.
+  Plain UDP, no TLS, no WebRTC — matches pbx-core's rtpengine anchoring, which
+  hands this profile plain RTP/AVP.
+
+  rtp-ip/sip-ip are __BIND_IP__, substituted by entrypoint.sh from
+  FREESWITCH_BIND_IP at container start — NOT FreeSWITCH's own
+  $${local_ip_v4} auto-detection. On this lab's multi-homed host (two NICs
+  on the same 192.168.1.0/24 subnet), local_ip_v4 picked a different
+  interface than the one pbx-core is configured (FREESWITCH_HOST) to dial,
+  so every group call's B2BUA to this profile failed with a SIP 503 —
+  nothing was listening at the address pbx-core actually tried. Pinning
+  both to the same explicit env var (docker-compose sets FREESWITCH_BIND_IP
+  to the same RTPENGINE_PUBLIC_IP that FREESWITCH_HOST already uses) makes
+  this immune to future interface/NIC changes on the host.
+
+  SECURITY NOTE: auth-calls is off and no apply-inbound-acl is set, so this
+  profile accepts any INVITE it receives. That's acceptable only because it's
+  reached solely by pbx-core over host networking / a private LAN in this lab
+  deployment — restrict with a firewall or an ACL before this leaves the lab.
+-->
+<include>
+  <profile name="intercom">
+    <settings>
+      <param name="user-agent-string" value="freeswitch-intercom-mixer"/>
+      <param name="sip-port" value="5080"/>
+      <param name="rtp-ip" value="__BIND_IP__"/>
+      <param name="sip-ip" value="__BIND_IP__"/>
+      <param name="context" value="intercom"/>
+      <param name="dialplan" value="XML"/>
+      <param name="auth-calls" value="false"/>
+      <param name="disable-register" value="true"/>
+      <param name="inbound-codec-prefs" value="G722,PCMU,PCMA"/>
+      <param name="outbound-codec-prefs" value="G722,PCMU,PCMA"/>
+      <param name="rtp-timeout-sec" value="300"/>
+      <param name="rtp-hold-timeout-sec" value="1800"/>
+      <param name="manage-presence" value="false"/>
+    </settings>
+  </profile>
+</include>

@@ -1,0 +1,191 @@
+# Container IP Intercom — full stack for podman-compose (or docker-compose).
+#
+#   podman-compose up -d --build
+#
+# Layout:
+#   postgres            — controller's database (users, audit, endpoints, groups, sessions)
+#   controller-backend   — REST API: auth, endpoint registry, health polling, session orchestration
+#   controller-frontend  — patch-bay UI (nginx, proxies /api/v1 to controller-backend)
+#   pbx-core             — drachtio SIP registrar/B2BUA (your custom TS routing logic)
+#   rtpengine            — media anchor/relay (plain RTP; see pbx-core/src/rtpengine.ts)
+#   freeswitch           — group open-mic mixer (mod_conference), pure media resource
+#
+# pbx-core, rtpengine, and freeswitch all run with host networking — required
+# for the routed/multi-subnet deployment (endpoints on other subnets need a
+# reachable media anchor, not NAT'd container IPs). Set RTPENGINE_PUBLIC_IP
+# below to this host's routed/LAN IP before starting.
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: intercom-postgres
+    environment:
+      POSTGRES_DB:       ${PGDATABASE:-intercom}
+      POSTGRES_USER:     ${PGUSER:-intercom_user}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-intercom_pass}
+    volumes:
+      - intercom-pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"   # host 5433 avoids clashing with any local Postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-intercom_user} -d ${PGDATABASE:-intercom}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  controller-backend:
+    build:
+      context: .
+      dockerfile: controller/backend/Containerfile
+    container_name: intercom-controller-backend
+    # Rootless podman remaps container root to a subordinate host UID (see
+    # /etc/subuid), NOT the invoking host user — so a container running as
+    # root gets EACCES on the mounted podman.sock below (owned by the host
+    # user, mode 0660, no "other" access). userns_mode: keep-id + running as
+    # the image's built-in `node` user (uid 1000, matching this host's user)
+    # makes the container's uid 1000 map to the SAME host uid 1000, so it
+    # can actually read/write the socket.
+    userns_mode: keep-id
+    user: "1000:1000"
+    # SELinux (Enforcing on this Fedora host) denies container_t processes
+    # `connectto` on sockets labeled container_runtime_t — the podman API
+    # socket's own label — regardless of the container_connect_any boolean
+    # or file-level :Z relabeling (both tried first, confirmed via
+    # `journalctl | grep avc` that this exact denial persisted after both).
+    # No boolean covers this specific case; disabling SELinux confinement
+    # for just this one container is simpler and more honestly scoped than
+    # a custom audit2allow policy module that's not really "for" anything
+    # else this container does.
+    security_opt:
+      - label:disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT:            "3100"
+      NODE_ENV:         production
+      JWT_SECRET:       ${JWT_SECRET:-dev-secret-change-in-production}
+      JWT_TTL:          "8h"
+      ADMIN_EMAIL:      ${ADMIN_EMAIL:-admin@intercom.local}
+      ADMIN_PASSWORD:   ${ADMIN_PASSWORD:-admin123}
+      CORS_ORIGIN:      ${CORS_ORIGIN:-*}
+      PGHOST:           postgres
+      PGPORT:           "5432"
+      PGDATABASE:       ${PGDATABASE:-intercom}
+      PGUSER:           ${PGUSER:-intercom_user}
+      PGPASSWORD:       ${PGPASSWORD:-intercom_pass}
+      HEALTH_INTERVAL_MS: "30000"
+      # Handed to the turret browser page so it can register directly to
+      # pbx-core's SIP/WS listener. Must be an address the OPERATOR'S BROWSER
+      # can reach (not 127.0.0.1, not host.containers.internal — those are
+      # only meaningful from inside a container). Reuses the same host
+      # routed/LAN IP as rtpengine, since pbx-core's WS listener (network_mode:
+      # host) is reachable at the same address.
+      PBX_WS_HOST:      ${RTPENGINE_PUBLIC_IP:?set RTPENGINE_PUBLIC_IP in .env to this host's routed/LAN IP}
+      PBX_WS_PORT:      "8088"
+      # pbx-core's read-only admin/status HTTP server (registrations + live
+      # calls, for the console's "Live" view). pbx-core runs network_mode:
+      # host; controller-backend is bridge-networked, so it must reach the
+      # HOST via podman's host-loopback address, not a LAN IP — same "same-
+      # host gotcha" as endpoint rest_urls (see CLAUDE.md).
+      PBX_BASE_URL:     "http://host.containers.internal:9080"
+      # System Health page's log viewer (routes/system.ts) talks to this
+      # over HTTP to fetch other containers' logs. SECURITY NOTE: this gives
+      # controller-backend control-plane visibility into EVERY container on
+      # the host, not just this project's 6 — a real widening of the
+      # security boundary, accepted deliberately for this lab. Requires a
+      # one-time host prerequisite: `systemctl --user enable --now
+      # podman.socket` (rootless podman) — see CLAUDE.md.
+      PODMAN_SOCKET_PATH: /run/podman/podman.sock
+    volumes:
+      # Hardcoded to uid 1000 (confirmed via `id -u` on this lab host) —
+      # adjust if the deployment user ever differs. `:Z` relabels the socket
+      # for this container's exclusive SELinux context — this host runs
+      # SELinux Enforcing (Fedora), and without it every access was denied
+      # (even a plain `ls` on the mounted path failed with Permission
+      # denied) regardless of the uid/keep-id fix above.
+      - /run/user/1000/podman/podman.sock:/run/podman/podman.sock:Z
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  controller-frontend:
+    build:
+      context: .
+      dockerfile: controller/frontend/Containerfile
+    container_name: intercom-controller-frontend
+    depends_on:
+      - controller-backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  pbx-core:
+    build:
+      context: ./pbx-core
+      dockerfile: Containerfile
+    container_name: intercom-pbx-core
+    network_mode: host   # required for reachable media anchoring across subnets
+    environment:
+      DRACHTIO_HOST:   "127.0.0.1"
+      DRACHTIO_PORT:   "9022"
+      DRACHTIO_SECRET: ${DRACHTIO_SECRET:-cymru}
+      RTPENGINE_HOST:  "127.0.0.1"
+      RTPENGINE_PORT:  "22222"
+      GROUP_PREFIX:    "*8"
+      # FreeSWITCH's "intercom" sip_profile binds sip-ip/rtp-ip to
+      # $${local_ip_v4} (its own detected LAN IP), NOT loopback — unlike
+      # rtpengine's ng control port, which is intentionally 127.0.0.1-only.
+      # 127.0.0.1 here was a dormant bug: nothing was listening there, so
+      # every group call's B2BUA to FreeSWITCH failed immediately (never
+      # caught because group calls had never been boot-tested before).
+      FREESWITCH_HOST: ${RTPENGINE_PUBLIC_IP:?set RTPENGINE_PUBLIC_IP in .env to this host's routed/LAN IP}
+      FREESWITCH_PORT: "5080"
+    depends_on:
+      - rtpengine
+      - freeswitch
+    restart: unless-stopped
+
+  rtpengine:
+    build:
+      context: ./images/rtpengine
+      dockerfile: Containerfile
+    container_name: intercom-rtpengine
+    network_mode: host   # anchors media on the host's routed interface
+    environment:
+      RTPENGINE_PUBLIC_IP: ${RTPENGINE_PUBLIC_IP:?set RTPENGINE_PUBLIC_IP in .env to this host's routed/LAN IP}
+      RTPENGINE_NG_PORT:   "22222"
+      RTPENGINE_PORT_MIN:  "30000"
+      RTPENGINE_PORT_MAX:  "40000"
+    restart: unless-stopped
+
+  # Group open-mic mixer. Pure media resource: pbx-core B2BUAs a group call
+  # here (see pbx-core/src/groups.ts); FreeSWITCH's own dialplan
+  # (images/freeswitch/dialplan/intercom.xml) answers and joins mod_conference.
+  # No ESL/ctrl-channel wiring — PTT mute happens at the SIP endpoint instead.
+  # NB: built from drachtio/drachtio-freeswitch-base; not boot-tested against
+  # the current base tag here, so check `podman logs intercom-freeswitch` and
+  # `podman exec -ti intercom-freeswitch /usr/local/freeswitch/bin/fs_cli -x "sofia status"`
+  # on first start.
+  freeswitch:
+    build:
+      context: ./images/freeswitch
+      dockerfile: Containerfile
+    container_name: intercom-freeswitch
+    network_mode: host   # RTP must be directly reachable for the routed/
+                          # multi-subnet case; the "intercom" sip_profile
+                          # binds to FREESWITCH_BIND_IP below, NOT loopback.
+    environment:
+      # Must match FREESWITCH_HOST (pbx-core service, below) exactly — pbx-
+      # core dials the group-call B2BUA at that address, so FreeSWITCH must
+      # actually be listening there. Explicit on purpose, not auto-detected:
+      # on a multi-homed host (>1 NIC on the same subnet), FreeSWITCH's own
+      # $${local_ip_v4} guess picked a different interface than this one,
+      # and every group call failed with a SIP 503 (nothing listening at
+      # the address pbx-core actually tried) — see entrypoint.sh.
+      FREESWITCH_BIND_IP: ${RTPENGINE_PUBLIC_IP:?set RTPENGINE_PUBLIC_IP in .env to this host's routed/LAN IP}
+    restart: unless-stopped
+
+volumes:
+  intercom-pgdata:

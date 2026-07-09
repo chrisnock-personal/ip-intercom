@@ -1,0 +1,45 @@
+# Podman pod for the IP intercom PBX backend (Phase 1).
+#   podman play kube pod.yaml
+#
+# Two containers share the pod's network namespace, so pbx-core reaches
+# rtpengine on 127.0.0.1. rtpengine needs a public/routable media IP for
+# multi-subnet: set RTPENGINE_PUBLIC_IP below to the host's LAN/routed IP.
+#
+# NOTE: rtpengine wants host networking (or a wide, explicitly-mapped RTP
+# port range) because it anchors media for endpoints on other subnets.
+# For a routed lab, running the pod with hostNetwork is by far the simplest.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: intercom
+  labels:
+    app: ip-intercom
+spec:
+  hostNetwork: true          # simplest correct choice for multi-subnet media
+  containers:
+    - name: pbx-core
+      image: localhost/intercom-pbx-core:latest
+      env:
+        - name: DRACHTIO_HOST
+          value: "127.0.0.1"
+        - name: DRACHTIO_PORT
+          value: "9022"
+        - name: DRACHTIO_SECRET
+          value: "cymru"           # change me
+        - name: RTPENGINE_HOST
+          value: "127.0.0.1"
+        - name: RTPENGINE_PORT
+          value: "22222"           # ng control port
+      # drachtio server + the TS app both run in this image (see Containerfile)
+
+    - name: rtpengine
+      image: docker.io/drachtio/rtpengine:latest
+      args:
+        - "--interface=RTPENGINE_PUBLIC_IP"   # <-- replace with host routed IP
+        - "--listen-ng=127.0.0.1:22222"
+        - "--port-min=30000"
+        - "--port-max=40000"
+        - "--log-level=6"
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN"]     # rtpengine kernel module / iptables path

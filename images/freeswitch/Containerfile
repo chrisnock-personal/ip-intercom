@@ -1,0 +1,33 @@
+# Group open-mic mixer. Built FROM the drachtio FreeSWITCH base, which already
+# compiles FreeSWITCH 1.10.x from source (avoiding SignalWire's now-gated
+# .deb packages) with mod_conference and mod_sofia included.
+#
+# We overlay only what we control: a minimal modules.conf, a sofia.conf that
+# includes our SIP profile, the intercom SIP profile + dialplan, and an
+# open-mic conference profile. Default vanilla sip profiles (internal.xml on
+# 5060, external.xml on 5080) are removed so nothing else grabs our port.
+FROM docker.io/drachtio/drachtio-freeswitch-base:latest
+
+# The base image installs libs (libfvad, grpc, protobuf, spandsp, sofia-sip)
+# under /usr/local/lib without ever re-running ldconfig, so its own cache is
+# stale and the freeswitch binary fails to find them at load time.
+RUN ldconfig
+
+RUN rm -f /usr/local/freeswitch/conf/sip_profiles/*.xml \
+          /usr/local/freeswitch/conf/dialplan/*.xml \
+ && mkdir -p /usr/local/freeswitch/conf/sip_profiles \
+             /usr/local/freeswitch/conf/dialplan \
+             /usr/local/freeswitch/conf/autoload_configs
+
+COPY modules.conf.xml                    /usr/local/freeswitch/conf/autoload_configs/modules.conf.xml
+COPY autoload_configs/sofia.conf.xml     /usr/local/freeswitch/conf/autoload_configs/sofia.conf.xml
+COPY autoload_configs/conference.conf.xml /usr/local/freeswitch/conf/autoload_configs/conference.conf.xml
+COPY sip_profiles/intercom.xml           /usr/local/freeswitch/conf/sip_profiles/intercom.xml
+COPY dialplan/intercom.xml               /usr/local/freeswitch/conf/dialplan/intercom.xml
+COPY entrypoint.sh                       /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Foreground, no interactive console, skip NAT detection (host networking).
+# entrypoint.sh substitutes the intercom profile's bind IP from
+# FREESWITCH_BIND_IP before exec'ing freeswitch — see sip_profiles/intercom.xml.
+ENTRYPOINT ["/entrypoint.sh"]

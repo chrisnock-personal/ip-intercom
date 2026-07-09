@@ -1,0 +1,27 @@
+<!--
+  autoload_configs/conference.conf.xml — full override of the stock file.
+  One profile, "intercom-default", used by every group room (each room is a
+  separate named conference within this profile, so N groups reuse one
+  profile). Entry/exit/mute sounds and energy gating are turned off since
+  this is meant to feel like an always-open channel, not a moderated meeting.
+-->
+<configuration name="conference.conf" description="Audio Conference">
+  <profiles>
+    <profile name="intercom-default">
+      <param name="rate" value="16000"/>
+      <param name="domain" value="intercom.local"/>
+      <param name="caller-id-name" value="intercom"/>
+      <param name="enter-sound" value=""/>
+      <param name="exit-sound" value=""/>
+      <param name="muted-sound" value=""/>
+      <param name="unmuted-sound" value=""/>
+      <param name="alone-sound" value=""/>
+      <param name="locked-sound" value=""/>
+      <param name="energy-level" value="0"/>
+      <param name="auto-energy-level" value="false"/>
+      <param name="comfort-noise" value="0"/>
+      <param name="auto-record" value="false"/>
+      <param name="min-required-recording" value="0"/>
+    </profile>
+  </profiles>
+</configuration>

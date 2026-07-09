@@ -1,0 +1,23 @@
+{
+  "name": "intercom-pbx-core",
+  "version": "0.1.0",
+  "description": "Custom SIP PBX brain for the container IP intercom (drachtio + rtpengine)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "drachtio-srf": "^4.5.35",
+    "drachtio-mw-registration-parser": "^0.1.2",
+    "rtpengine-client": "^0.4.10",
+    "debug": "^4.3.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "@types/rtpengine-client": "^0.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0"
+  }
+}

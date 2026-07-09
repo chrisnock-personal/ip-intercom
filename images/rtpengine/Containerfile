@@ -1,0 +1,10 @@
+# rtpengine media anchor/relay — installed from the Debian bookworm package
+# (no source build, no gated repos). Runs userspace-only (--table=-1) so it
+# needs no kernel module inside the container.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends rtpengine-daemon \
+ && rm -rf /var/lib/apt/lists/*
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

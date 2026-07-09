@@ -1,0 +1,23 @@
+<!--
+  dialplan/intercom.xml — a self-contained context matching the "intercom"
+  sip_profile's context param, so it doesn't touch the stock default/public
+  dialplan contexts at all.
+
+  Every call answers and joins a mod_conference room named after whatever was
+  dialled (pbx-core strips the GROUP_PREFIX before it gets here — see
+  pbx-core/src/groups.ts — so destination_number is just the group's
+  dial_code, e.g. "floor-a"). mod_conference's default behaviour is already
+  open-mic: every unmuted participant hears every other one. PTT is handled
+  entirely at the SIP endpoint (sendonly RTP), so there is nothing else to
+  configure here.
+-->
+<include>
+  <context name="intercom">
+    <extension name="join-conference">
+      <condition field="destination_number" expression="^(.+)$">
+        <action application="answer"/>
+        <action application="conference" data="$1@intercom-default"/>
+      </condition>
+    </extension>
+  </context>
+</include>

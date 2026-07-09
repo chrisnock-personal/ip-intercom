@@ -30,7 +30,7 @@ Six compose services: `postgres`, `controller-backend`, `controller-frontend`
 <img width="1169" height="959" alt="Image" src="https://github.com/user-attachments/assets/78be5a90-a6b2-4580-9e5a-92e42d4a4555"/><br>
 <img width="1174" height="896" alt="Image" src="https://github.com/user-attachments/assets/08cc2e70-3216-43cd-baeb-8fe4c050febc" /><br>
 
-```
+``
 
 ## What's implemented
 

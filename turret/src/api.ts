@@ -19,8 +19,6 @@ export interface TurretSession {
   name: string;
   extension: string;
   buttons: Button[];
-  pbxWsHost: string;
-  pbxWsPort: number;
 }
 
 // A shared desk kiosk, not a personal device — sessionStorage (not

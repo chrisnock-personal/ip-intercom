@@ -7,12 +7,17 @@
 import JsSIP from 'jssip';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-export function createTurretUa(extension: string, pbxWsHost: string, pbxWsPort: number): any {
-  const wsUri = `ws://${pbxWsHost}:${pbxWsPort}/ws`;
+export function createTurretUa(extension: string): any {
+  // Same origin the page itself loaded from — nginx proxies /ws through to
+  // pbx-core's plain ws://:8088 listener (see nginx.conf), so this is
+  // always correct regardless of host/scheme, no server-handed config
+  // needed. wss:// automatically when the page itself is HTTPS.
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUri = `${proto}://${window.location.host}/ws`;
   const socket = new JsSIP.WebSocketInterface(wsUri);
   const ua = new JsSIP.UA({
     sockets: [socket],
-    uri: `sip:${extension}@${pbxWsHost}`,
+    uri: `sip:${extension}@${window.location.hostname}`,
     // pbx-core has no SIP digest auth at all today (accepts any REGISTER
     // unconditionally) — this is a throwaway value, not a real credential.
     // The turret-login password (checked server-side, see api.ts) is a
@@ -36,6 +41,6 @@ export function createTurretUa(extension: string, pbxWsHost: string, pbxWsPort: 
   return ua;
 }
 
-export function targetUri(extension: string, pbxWsHost: string): string {
-  return `sip:${extension}@${pbxWsHost}`;
+export function targetUri(extension: string): string {
+  return `sip:${extension}@${window.location.hostname}`;
 }

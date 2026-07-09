@@ -23,10 +23,7 @@ router.post('/login', async (req, res, next) => {
     });
     const buttons = await listButtons(user.id);
     await audit(user.extension, 'directory_user', user.id, 'login');
-    res.json({
-      token, name: user.name, extension: user.extension, buttons,
-      pbxWsHost: config.pbxWsHost, pbxWsPort: config.pbxWsPort,
-    });
+    res.json({ token, name: user.name, extension: user.extension, buttons });
   } catch (err) { next(err); }
 });
 
@@ -39,10 +36,7 @@ router.post('/logout', requireTurretAuth, async (req, res) => {
 router.get('/me', requireTurretAuth, async (req, res, next) => {
   try {
     const buttons = await listButtons(req.turretUser!.id);
-    res.json({
-      name: req.turretUser!.name, extension: req.turretUser!.extension, buttons,
-      pbxWsHost: config.pbxWsHost, pbxWsPort: config.pbxWsPort,
-    });
+    res.json({ name: req.turretUser!.name, extension: req.turretUser!.extension, buttons });
   } catch (err) { next(err); }
 });
 

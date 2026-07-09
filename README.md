@@ -8,14 +8,15 @@ users, groups, live status, health, audit, and database backup. Built for a
 **routed / multi-subnet** deployment.
 
 ```
-turret (browser: getUserMedia/RTCPeerConnection over SIP-over-WS :8088)
+turret (browser: getUserMedia/RTCPeerConnection, wss:// or ws:// via nginx)
       │ SIP/WS (WebRTC media, DTLS-SRTP)
       ▼
    pbx-core (drachtio + TS)  ◀─ ng ─▶  rtpengine (media anchor; bridges DTLS-SRTP ↔ plain RTP)
       │ group calls (*8<code>) B2BUA'd to ▼
    freeswitch (mod_conference open-mic mixer)
 
-controller-frontend (nginx: console + /turret/)  ──/api/v1──▶ controller-backend
+controller-frontend (nginx: console + /turret/ + /ws proxy, HTTP+HTTPS)
+                                                  ──/api/v1──▶ controller-backend
                                                                 (Express+TS, Postgres)
 ```
 
@@ -106,10 +107,13 @@ cp .env.example .env
 
 podman-compose up -d --build
 ```
-- Controller UI: `http://<host>:8080` — sign in with `ADMIN_EMAIL` /
-  `ADMIN_PASSWORD` from `.env`.
-- Turret: `http://<host>:8080/turret/` — **must be `localhost`** today (no
-  TLS yet, and `getUserMedia` needs a secure context).
+- Controller UI: `http://<host>:8080` or `https://<host>:8443` — sign in
+  with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`.
+- Turret: `http://<host>:8080/turret/` (localhost only — `getUserMedia`
+  needs a secure context, and `localhost` is browser-exempted) or
+  `https://<host>:8443/turret/` (works from a genuinely separate machine
+  too, once you click through the self-signed cert warning once per
+  browser — see "TLS" below).
 - Controller API: `http://<host>:3100/api/v1/...`
 - pbx-core SIP/WS: `<host>:8088`, SIP UDP/TCP on `:5060`.
 - Postgres: exposed on host `5433` for direct inspection if needed.
@@ -133,6 +137,17 @@ specific case. This widens that one container's blast radius (full
 control-plane visibility into every container on the host, not just this
 project's 6) — accepted deliberately for this lab; skip the log viewer
 entirely if you'd rather not take that tradeoff.
+
+### TLS
+`controller-frontend` generates a self-signed cert on first start
+(persisted in a volume, so it survives redeploys — no new warning every
+time) and serves both plain HTTP (`:8080`) and HTTPS (`:8443`) side by
+side; nothing extra to configure beyond `RTPENGINE_PUBLIC_IP` already
+being set in `.env` (reused as the cert's SAN entry). The turret's SIP/WS
+signaling is proxied through the same nginx at `/ws`, so it always
+connects back to whichever origin the page itself loaded from — no
+separate host/port to hand it. First visit over HTTPS: click through the
+browser's self-signed-certificate warning once (per browser/device).
 
 ### Setting up a turret
 1. Console → **Directory Users** panel → create a person (name, extension,
@@ -171,7 +186,9 @@ controller/
                                audit/logs, admin db backup/restore
   frontend/                 — console (Vite/React, built + served by nginx) —
                                its Containerfile also builds turret/ as a
-                               second stage, served at /turret/
+                               second stage, served at /turret/;
+                               entrypoint.sh generates a self-signed TLS
+                               cert on first start
 turret/                     — real-browser trading-turret softphone (Vite/
                                React/TS): genuine getUserMedia/
                                RTCPeerConnection, 2 Handsets + 1 Speaker +
@@ -190,9 +207,10 @@ patches/
 - SIP registration is authless and the controller's endpoint REST calls are
   unauthenticated by default (lab prototype) — add SIP digest auth and
   endpoint-side API tokens before this leaves the lab.
-- No TLS anywhere — the turret only works via `localhost`. A real remote
-  desk needs TLS in front of both the console/turret page origin and
-  pbx-core's SIP/WS connection (`ws://` → `wss://`).
+- TLS is self-signed (see "TLS" above) — fine for a private LAN lab, but
+  every browser/device needs its own one-time trust exception. Swap in a
+  real cert by mounting it over `/etc/nginx/tls/{cert,key}.pem` if you
+  ever have one (e.g. an internal CA).
 - `HEALTH_INTERVAL_MS` / retention are env-configurable on
   `controller-backend`, same pattern as Walk the Nxt Floor's
   `sipHealthService`.
@@ -202,8 +220,6 @@ patches/
   adjust the relative path if running straight from `src/`.
 
 ## Roadmap
-- **Turret reachable from a real remote desk** — needs TLS (see above), a
-  real infra project, not a config tweak.
 - **Handset A/B repurposed for real SIP extensions on an external PBX** —
   a shared-line-appearance pattern (global `lines`, many-to-many
   assignment to directory users, "capture" pickup from the turret UI).

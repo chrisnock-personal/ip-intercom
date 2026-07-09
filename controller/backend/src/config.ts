@@ -22,13 +22,6 @@ const config = {
   // to host.containers.internal since pbx-core runs network_mode: host.
   pbxBaseUrl: process.env.PBX_BASE_URL || 'http://127.0.0.1:9080',
 
-  // Where the turret's browser JsSIP UA registers (SIP-over-WS). Returned to
-  // the turret page by /api/v1/turret/login and /me rather than the page
-  // guessing its own host — pbx-core may live on a different host in a real
-  // routed/multi-subnet deployment.
-  pbxWsHost: process.env.PBX_WS_HOST || '127.0.0.1',
-  pbxWsPort: parseInt(process.env.PBX_WS_PORT || '8088', 10),
-
   // Endpoint health polling (hits each endpoint's container-sip-endpoint /api/status)
   healthInterval:      parseInt(process.env.HEALTH_INTERVAL_MS || '30000', 10),
   healthLogRetentionDays: parseInt(process.env.HEALTH_LOG_RETENTION_DAYS || '90', 10),

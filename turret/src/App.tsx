@@ -203,7 +203,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
-    const ua = createTurretUa(session.extension, session.pbxWsHost, session.pbxWsPort);
+    const ua = createTurretUa(session.extension);
     uaRef.current = ua;
 
     ua.on('newRTCSession', (data: any) => {
@@ -279,8 +279,8 @@ export default function App() {
     }
 
     const dialTarget = b.button_type === 'direct'
-      ? targetUri(b.target_extension!, s.pbxWsHost)
-      : targetUri(`${GROUP_PREFIX}${b.target_group_dial_code}`, s.pbxWsHost);
+      ? targetUri(b.target_extension!)
+      : targetUri(`${GROUP_PREFIX}${b.target_group_dial_code}`);
 
     // Direct calls never start muted — PTT is a group/hoot concept, not a
     // private 2-party line. A group's PTT default seeds the initial state.

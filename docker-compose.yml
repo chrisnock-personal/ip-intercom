@@ -76,14 +76,6 @@ services:
       PGUSER:           ${PGUSER:-intercom_user}
       PGPASSWORD:       ${PGPASSWORD:-intercom_pass}
       HEALTH_INTERVAL_MS: "30000"
-      # Handed to the turret browser page so it can register directly to
-      # pbx-core's SIP/WS listener. Must be an address the OPERATOR'S BROWSER
-      # can reach (not 127.0.0.1, not host.containers.internal — those are
-      # only meaningful from inside a container). Reuses the same host
-      # routed/LAN IP as rtpengine, since pbx-core's WS listener (network_mode:
-      # host) is reachable at the same address.
-      PBX_WS_HOST:      ${RTPENGINE_PUBLIC_IP:?set RTPENGINE_PUBLIC_IP in .env to this host's routed/LAN IP}
-      PBX_WS_PORT:      "8088"
       # pbx-core's read-only admin/status HTTP server (registrations + live
       # calls, for the console's "Live" view). pbx-core runs network_mode:
       # host; controller-backend is bridge-networked, so it must reach the
@@ -117,8 +109,17 @@ services:
     container_name: intercom-controller-frontend
     depends_on:
       - controller-backend
+    environment:
+      # SAN entry for the self-signed TLS cert entrypoint.sh generates on
+      # first start (see /etc/nginx/tls, a persisted volume below) — reuses
+      # the same "this host's routed/LAN IP" value everything else in this
+      # stack already uses, rather than a new env var.
+      CERT_SAN_IP: ${RTPENGINE_PUBLIC_IP:?set RTPENGINE_PUBLIC_IP in .env to this host's routed/LAN IP}
+    volumes:
+      - intercom-tls-certs:/etc/nginx/tls
     ports:
       - "8080:80"
+      - "8443:443"
     restart: unless-stopped
 
   pbx-core:
@@ -189,3 +190,4 @@ services:
 
 volumes:
   intercom-pgdata:
+  intercom-tls-certs:

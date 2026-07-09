@@ -26,6 +26,21 @@ export const DIALABLE_CHANNEL_IDS: ChannelId[] = ['handset_a', 'handset_b', 'spe
 
 export type ChannelStatus = 'idle' | 'calling' | 'ringing' | 'connected';
 
+// Fire-and-forget call-lifecycle pings for the console's audit/session
+// history — turrets dial directly through pbx-core, so nothing else in the
+// backend ever sees these calls happen otherwise. Never call-critical: a
+// reporting failure must not affect the actual call (see App.tsx's wiring).
+export interface CallMeta {
+  kind: 'direct' | 'group';
+  direction: 'outgoing' | 'incoming';
+  counterpartExtension: string;
+}
+export interface CallEventPayload extends Partial<CallMeta> {
+  type: 'start' | 'end';
+  clientCallId: string;
+  reason?: string;
+}
+
 export interface ChannelState {
   status: ChannelStatus;
   label: string | null; // who/what this channel is currently talking to
@@ -42,6 +57,9 @@ export class ChannelManager {
   // Reverse lookup so a session's event handlers always know where it
   // CURRENTLY lives, even after moveCall() relocates it.
   private sessionChannel = new Map<any, ChannelId>();
+  // Keyed by session object (not channel) so it naturally follows a call
+  // across moveCall() without any extra bookkeeping there.
+  private sessionCallId = new Map<any, string>();
   private audioEls: Record<ChannelId, HTMLAudioElement>;
   private states: Record<ChannelId, ChannelState> = {
     handset_a: { ...IDLE },
@@ -51,7 +69,7 @@ export class ChannelManager {
   };
   private listeners = new Set<Listener>();
 
-  constructor() {
+  constructor(private onCallEvent?: (evt: CallEventPayload) => void) {
     this.audioEls = {
       handset_a: new Audio(),
       handset_b: new Audio(),
@@ -99,11 +117,14 @@ export class ChannelManager {
     return null;
   }
 
-  private wireSession(ch: ChannelId, session: any, label: string, initialMuted = false) {
+  private wireSession(ch: ChannelId, session: any, label: string, callMeta: CallMeta, initialMuted = false) {
     this.sessions[ch] = session;
     this.sessionChannel.set(session, ch);
+    const clientCallId = crypto.randomUUID();
+    this.sessionCallId.set(session, clientCallId);
     this.states[ch] = { status: 'calling', label, muted: initialMuted, onHold: false };
     this.emit();
+    this.onCallEvent?.({ type: 'start', clientCallId, ...callMeta });
 
     // Every handler below re-looks-up the session's current channel and
     // verifies it's still the live occupant there — a session that's been
@@ -174,16 +195,24 @@ export class ChannelManager {
     session.on('ended', () => {
       const c = liveChannel();
       this.sessionChannel.delete(session);
-      if (c) this.clear(c);
+      if (c) this.clear(c, 'ended');
     });
     session.on('failed', () => {
       const c = liveChannel();
       this.sessionChannel.delete(session);
-      if (c) this.clear(c);
+      if (c) this.clear(c, 'failed');
     });
   }
 
-  private clear(ch: ChannelId) {
+  private clear(ch: ChannelId, reason = 'hangup') {
+    const session = this.sessions[ch];
+    if (session) {
+      const clientCallId = this.sessionCallId.get(session);
+      if (clientCallId) {
+        this.onCallEvent?.({ type: 'end', clientCallId, reason });
+        this.sessionCallId.delete(session);
+      }
+    }
     delete this.sessions[ch];
     this.audioEls[ch].srcObject = null;
     this.states[ch] = { ...IDLE };
@@ -225,17 +254,17 @@ export class ChannelManager {
   /** Dial out on a channel. Tears down whatever's already there first.
    * `initialMuted` seeds a group's PTT default (see App.tsx) — direct calls
    * never pass this, always starting talking. */
-  dial(ua: any, ch: ChannelId, target: string, label: string, initialMuted = false): void {
+  dial(ua: any, ch: ChannelId, target: string, label: string, callMeta: CallMeta, initialMuted = false): void {
     this.hangup(ch);
     const session = ua.call(target, { mediaConstraints: { audio: true, video: false } });
-    this.wireSession(ch, session, label, initialMuted);
+    this.wireSession(ch, session, label, callMeta, initialMuted);
   }
 
   /** Answer an incoming session on a channel. Tears down whatever's there first. */
-  answer(ch: ChannelId, session: any, label: string): void {
+  answer(ch: ChannelId, session: any, label: string, callMeta: CallMeta): void {
     this.hangup(ch);
     session.answer({ mediaConstraints: { audio: true, video: false } });
-    this.wireSession(ch, session, label);
+    this.wireSession(ch, session, label, callMeta);
   }
 
   /** Move a live call to a different channel — pure local reassignment, the

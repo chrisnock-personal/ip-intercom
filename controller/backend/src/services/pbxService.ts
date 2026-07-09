@@ -12,7 +12,8 @@
 import { query, queryOne } from '../db/pool';
 import { createError } from '../middleware/errorHandler';
 import { audit } from './auditService';
-import { listMembers, getGroup } from './groupService';
+import { listMembers, getGroup, getGroupByDialCode } from './groupService';
+import { TurretSessionUser } from '../middleware/turretSession';
 
 // Must match pbx-core's config.groupPrefix (src/config.ts, GROUP_PREFIX env).
 // Kept as a constant here rather than shared code since pbx-core and the
@@ -137,4 +138,57 @@ export async function startGroup(actor: string, groupId: string): Promise<{ sess
     kind: 'group', group: group.name, dialString, joined: results.length - failed.length, failed: failed.length,
   });
   return { sessionId };
+}
+
+// ── Turret call tracking ─────────────────────────────────────────────────
+// Turrets dial directly over SIP through pbx-core — none of the above
+// endpoint-driven orchestration is involved — so these are pinged
+// separately by the turret itself (routes/turret.ts's /call-events) rather
+// than being the thing that places the call. Best-effort: a reporting
+// failure here must never be allowed to affect an actual call, so callers
+// treat these as fire-and-forget.
+
+async function getDirectoryUserIdByExtension(extension: string): Promise<string | null> {
+  const row = await queryOne<{ id: string }>(
+    `SELECT id FROM intercom_directory_users WHERE LOWER(extension) = LOWER($1)`, [extension]);
+  return row?.id ?? null;
+}
+
+export async function recordTurretCallStart(
+  turretUser: TurretSessionUser,
+  clientCallId: string,
+  kind: 'direct' | 'group',
+  direction: 'outgoing' | 'incoming',
+  counterpartExtension: string,
+): Promise<{ sessionId: string } | null> {
+  const groupId = kind === 'group' ? (await getGroupByDialCode(counterpartExtension))?.id ?? null : null;
+  const counterpartDirectoryUserId = kind === 'direct' ? await getDirectoryUserIdByExtension(counterpartExtension) : null;
+
+  const initiatorId = direction === 'outgoing' ? turretUser.id : counterpartDirectoryUserId;
+  const targetId    = direction === 'outgoing' ? counterpartDirectoryUserId : turretUser.id;
+
+  const session = await queryOne<{ id: string }>(
+    `INSERT INTO intercom_sessions
+       (kind, initiator_directory_user_id, target_directory_user_id, group_id, state, client_call_id)
+     VALUES ($1,$2,$3,$4,'active',$5) RETURNING id`,
+    [kind, initiatorId, targetId, groupId, clientCallId]);
+  if (!session) return null;
+
+  await audit(turretUser.extension, 'session', session.id, 'call_start', {
+    kind, direction, from: turretUser.extension, counterpart: counterpartExtension,
+  });
+  return { sessionId: session.id };
+}
+
+export async function recordTurretCallEnd(
+  turretUser: TurretSessionUser,
+  clientCallId: string,
+  reason?: string,
+): Promise<void> {
+  const result = await queryOne<{ id: string }>(
+    `UPDATE intercom_sessions SET state='ended', ended_at=now(), end_reason=$2
+     WHERE client_call_id = $1 AND state = 'active' RETURNING id`,
+    [clientCallId, reason ?? null]);
+  if (!result) return; // no matching active session — nothing to end, nothing to audit
+  await audit(turretUser.extension, 'session', result.id, 'call_end', { reason });
 }

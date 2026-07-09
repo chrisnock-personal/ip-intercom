@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, Button, TurretSession } from './api';
 import { createTurretUa, targetUri } from './sipUa';
-import { ChannelManager, ChannelId, ChannelState, CHANNEL_IDS, DIALABLE_CHANNEL_IDS } from './channels';
+import { ChannelManager, ChannelId, ChannelState, CHANNEL_IDS, DIALABLE_CHANNEL_IDS, CallEventPayload } from './channels';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -9,6 +9,14 @@ import { ChannelManager, ChannelId, ChannelState, CHANNEL_IDS, DIALABLE_CHANNEL_
 // deployables, no shared code between them. If you change one, change both
 // (same convention already used in controller-backend's pbxService.ts).
 const GROUP_PREFIX = '*8';
+
+// Extracts just the extension from a SIP URI like "sip:1002@host" -> "1002"
+// — same shape as pbx-core's own registrar.ts extOf() helper, duplicated
+// here since turret and pbx-core are separate deployables.
+function extOf(uri: string): string {
+  const m = uri.match(/sips?:([^@;>]+)@/i);
+  return m ? m[1] : uri;
+}
 
 const CHANNEL_LABELS: Record<ChannelId, string> = {
   handset_a: 'Handset A',
@@ -166,7 +174,11 @@ export default function App() {
   // per-user/per-installation setting once Handset A/B become external lines.
   const [intercomAutoAnswer, setIntercomAutoAnswer] = useState(true);
   const uaRef = useRef<any>(null);
-  const managerRef = useRef<ChannelManager>(new ChannelManager());
+  const managerRef = useRef<ChannelManager>(new ChannelManager((evt: CallEventPayload) => {
+    // Fire-and-forget by design — a reporting failure must never affect an
+    // actual call. See channels.ts's header comment on CallEventPayload.
+    api.reportCallEvent(evt).catch((err) => console.warn(`[call-events] report failed: ${(err as Error).message}`));
+  }));
   const sessionRef = useRef<TurretSession | null>(null);
   // newRTCSession below is registered once per login (effect keyed on
   // [session]), so it needs a ref rather than the state value directly to
@@ -220,7 +232,9 @@ export default function App() {
           try { rtcSession.terminate({ status_code: 486 }); } catch { /* ignore */ }
           return;
         }
-        managerRef.current.answer('intercom', rtcSession, from);
+        managerRef.current.answer('intercom', rtcSession, from, {
+          kind: 'direct', direction: 'incoming', counterpartExtension: extOf(from),
+        });
         return;
       }
 
@@ -275,12 +289,17 @@ export default function App() {
     // Direct buttons always dial via the dedicated 'intercom' channel,
     // ignoring the Dial-on selector — only group buttons respect it.
     const channel: ChannelId = b.button_type === 'direct' ? 'intercom' : dialChannel;
-    managerRef.current.dial(ua, channel, dialTarget, label, initialMuted);
+    const callMeta = b.button_type === 'direct'
+      ? { kind: 'direct' as const, direction: 'outgoing' as const, counterpartExtension: b.target_extension! }
+      : { kind: 'group' as const, direction: 'outgoing' as const, counterpartExtension: b.target_group_dial_code! };
+    managerRef.current.dial(ua, channel, dialTarget, label, callMeta, initialMuted);
   }, [dialChannel]);
 
   const answerIncoming = useCallback((channel: ChannelId) => {
     if (!incoming) return;
-    managerRef.current.answer(channel, incoming.session, incoming.from);
+    managerRef.current.answer(channel, incoming.session, incoming.from, {
+      kind: 'direct', direction: 'incoming', counterpartExtension: extOf(incoming.from),
+    });
     setIncoming(null);
   }, [incoming]);
 

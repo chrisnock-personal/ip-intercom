@@ -1,104 +1,92 @@
 # Container IP Intercom
 
-A container-based IP intercom: **custom TypeScript PBX core** (drachtio +
-rtpengine), a **controller** (backend + patch-bay frontend) for users, audit,
-endpoint health, and session orchestration, and integration notes for your
-existing **container-sip-endpoint**. Open-mic by default with a PTT option,
-built for a **routed / multi-subnet** deployment.
+A container-based IP intercom with **direct** (point-to-point) and **group**
+(open-mic + PTT) calling, a **custom TypeScript PBX core** (drachtio +
+rtpengine), a real-browser **WebRTC softphone** ("turret", modeled on a
+trading-desk turret), and an admin **controller console** for directory
+users, groups, live status, health, audit, and database backup. Built for a
+**routed / multi-subnet** deployment.
 
 ```
-┌──────────────────────────┐        ┌──────────────────┐
-│  controller-frontend      │  API   │ controller-backend│
-│  patch-bay UI (nginx)     │◄──────►│ users, audit,     │
-└──────────────────────────┘        │ endpoint registry, │
-                                     │ health poll,       │
-                                     │ session orchestration
-                                     └─────────┬──────────┘
-                                               │ drives each endpoint's
-                                               │ own REST API (/api/call, …)
-                                               ▼
-  container-sip-endpoint × N   (JsSIP: SIP-over-WS signalling + PLAIN RTP media)
-        │ SIP/WS :8088                     │ RTP/AVP (dgram)
-        ▼                                  ▼
-   ┌──────────────────────────┐      ┌──────────────────┐
-   │  pbx-core (drachtio)     │◄────►│    rtpengine     │
-   │  registrar, B2BUA,       │  ng  │  anchor / relay  │
-   │  intercom routing        │      │  plain RTP       │
-   └──────────────────────────┘      └──────────────────┘
+turret (browser: getUserMedia/RTCPeerConnection over SIP-over-WS :8088)
+      │ SIP/WS (WebRTC media, DTLS-SRTP)
+      ▼
+   pbx-core (drachtio + TS)  ◀─ ng ─▶  rtpengine (media anchor; bridges DTLS-SRTP ↔ plain RTP)
+      │ group calls (*8<code>) B2BUA'd to ▼
+   freeswitch (mod_conference open-mic mixer)
+
+controller-frontend (nginx: console + /turret/)  ──/api/v1──▶ controller-backend
+                                                                (Express+TS, Postgres)
 ```
+
+Six compose services: `postgres`, `controller-backend`, `controller-frontend`
+(also serves the turret at `/turret/`), `pbx-core`, `rtpengine`, `freeswitch`.
 
 ## What's implemented
 
-### Phase 1 — direct intercom
-- **pbx-core** — drachtio SIP registrar + B2BUA. Dial a registered AOR → callee
-  gets an auto-answer header (`Call-Info`/`Alert-Info`), media anchored via
-  rtpengine as **plain RTP/AVP** (container-sip-endpoint rejects ICE/DTLS, so no
-  WebRTC bridging is used).
+### Calling
+- **Direct intercom** — dial a registered extension; pbx-core injects an
+  auto-answer header (`Call-Info`/`Alert-Info`) and anchors media through
+  rtpengine. Real SIP **hold/resume** (a genuine re-INVITE, not just local
+  mute) works both directions of a call.
+- **Group open-mic** — pbx-core B2BUAs a group call (`*8<dial_code>`)
+  straight to FreeSWITCH, which joins it into a `mod_conference` room of the
+  same name. Every unmuted member hears every other one — no custom mixing
+  logic. PTT floor control is done client-side (gating the local mic track),
+  not at the mixer.
+- **turret/** — the only endpoint type in this system: a real-browser
+  softphone (genuine `getUserMedia`/`RTCPeerConnection`, no headless shims)
+  modeled on a trading voice turret. Three independent audio channels
+  (Handset A, Handset B, Speaker) plus a dedicated Intercom channel with a
+  configurable auto-answer toggle, driven by a **directory user** login
+  (extension + password, a hot-desk model — not tied to one physical
+  device). Click-to-arm channel selection for group calls, move a live call
+  between channels mid-call, per-channel hold/resume and mute/PTT.
+- rtpengine bridges a genuine WebRTC leg (the turret) to plain RTP
+  (FreeSWITCH) automatically — including the trickier case of **two**
+  simultaneous WebRTC legs (turret↔turret), which needed its own
+  `ICE-lite` handling distinct from the single-WebRTC-leg case.
 
-### Phase 2 — group open-mic + PTT floor
-- **freeswitch** — a pure media resource. pbx-core B2BUAs a group call
-  (`*8<dial_code>`) straight to FreeSWITCH; FreeSWITCH's own dialplan answers
-  and joins the destination number into a `mod_conference` room of the same
-  name (`freeswitch/dialplan/intercom.xml`, `freeswitch/autoload_configs/conference.conf.xml`).
-  mod_conference's default behaviour already **is** open-mic — every unmuted
-  participant hears every other one — so there's no custom mixing logic.
-- **PTT floor control has no server-side mute.** Muting a participant reuses
-  the same mechanism as direct-call hold: a re-INVITE to `a=sendonly` on that
-  endpoint's own leg (`/api/hold` / `/api/resume`). A muted leg simply stops
-  sending RTP, so the mixer naturally excludes it. This was a deliberate
-  simplification over ESL/drachtio-fsmrf floor control — much less to build
-  and test, at the cost of mute being endpoint-driven rather than
-  controller-driven-at-the-mixer. If you later need a moderator who can force-
-  mute someone else's mic irrespective of that endpoint's cooperation, that's
-  the point where ESL control becomes worth the added complexity.
-- **controller-backend** — group CRUD (`routes/groups.ts`, `services/groupService.ts`):
-  create a group, add/remove members, flag members `can_talk: false` for
-  listen-only (announce zones). `pbxService.startGroup()` dials every talking
-  member's own endpoint into the group's conference extension.
-- **controller-frontend** — a Groups panel: create a group, tick which
-  endpoints are members, **Start** dials every talking member in. Active
-  sessions (direct or group) expand to show participants, each with a
-  **Talk/Mute** button that drives the PTT floor.
-
-### Common (both phases)
-- **controller-backend** — Express + PostgreSQL, styled after your Walk the
-  Nxt Floor conventions: `pg` pool with `query`/`queryOne`/`withTransaction`,
-  numbered SQL migrations tracked in `schema_migrations`, JWT auth with
-  viewer/editor/admin roles, an append-only `audit_log`, and a background
-  health poller (`intercom_endpoint_health_log`, pruned on a retention window)
-  that hits each endpoint's `/api/status`.
-- **controller-frontend** — a patch-bay console: click a jack to set the
-  caller, shift-click to set the callee, start/end sessions, see live
-  online/offline status and latency per endpoint.
+### Controller console
+- **Live** — real registered turrets and in-progress calls, polled
+  straight from pbx-core's own in-memory state (pbx-core has no database
+  by design; a small admin HTTP endpoint on pbx-core exposes this, enriched
+  with friendly names by the controller). Call-type badges (ICM/GRP-ICM)
+  and per-type metrics.
+- **Groups** / **Directory Users** — full CRUD (create/edit/delete), button
+  assignments (direct or group targets) per directory user.
+- **Health** (admin only) — host CPU/mem/disk, DB size/stats, endpoint
+  statuses, pbx-core reachability, and a live container-log viewer (reads
+  other containers' logs over the podman API socket).
+- **Audit** (admin only) — searchable history of `audit_log` (who did what,
+  when — logins, CRUD, call start/end, PTT grants, including turret-placed
+  calls).
+- **Database** (admin only) — `pg_dump` backup download, restore from an
+  uploaded dump, `VACUUM ANALYZE`, table size/bloat stats, retention/purge
+  for `audit_log`/`intercom_sessions`, and gzip archive + optional SCP
+  transfer.
+- Users / JWT / RBAC (viewer/editor/admin), append-only audit log,
+  background endpoint health polling — conventions deliberately mirror
+  Chris's Walk the Nxt Floor project (`pg` pool, numbered migrations, JWT
+  roles, `audit_log` shape).
 
 ### Media images are built locally, not pulled
-Both media components are built from Dockerfiles under `images/` rather than
-pulled as pre-built images, because the obvious public images don't work:
-SignalWire's FreeSWITCH image is behind an auth-gated registry, and the only
-`:latest` rtpengine on Docker Hub is ~5 years old. So:
+Both media components are built from Dockerfiles under `images/` rather
+than pulled as pre-built images, because the obvious public images don't
+work: SignalWire's FreeSWITCH image is behind an auth-gated registry, and
+the only `:latest` rtpengine on Docker Hub is ~5 years old.
 
-- **`images/rtpengine`** installs `rtpengine-daemon` from the Debian bookworm
-  package (no source build, no gated repo) and runs it **userspace-only**
-  (`--table=-1`) so it needs no kernel module in the container.
-- **`images/freeswitch`** builds `FROM drachtio/drachtio-freeswitch-base`
-  (which compiles FreeSWITCH 1.10.x from source with `mod_conference` +
-  `mod_sofia`), then overlays a minimal `modules.conf`, a `sofia.conf` that
-  includes our SIP profile, the intercom SIP profile + dialplan, and an
-  open-mic conference profile. Default vanilla profiles (`internal`/`external`)
-  are removed so nothing else claims port 5080.
-
-I could not boot-test either image here (no container runtime / network in the
-build environment). They're written against confirmed package names and the
-documented drachtio base layout, but the honest first-boot checks are:
-```bash
-podman logs intercom-rtpengine        # should show it binding the ng port
-podman logs intercom-freeswitch
-podman exec -ti intercom-freeswitch /usr/local/freeswitch/bin/fs_cli -x "sofia status"
-podman exec -ti intercom-freeswitch /usr/local/freeswitch/bin/fs_cli -x "conference list"
-```
-If FreeSWITCH's base tag has shifted its config layout, the fix is almost
-always a path nudge in `images/freeswitch/Containerfile` — the overlay files
-themselves are standard FreeSWITCH XML.
+- **`images/rtpengine`** installs `rtpengine-daemon` from the Debian
+  bookworm package and runs it **userspace-only** (`--table=-1`) so it
+  needs no kernel module in the container.
+- **`images/freeswitch`** builds `FROM drachtio/drachtio-freeswitch-base`,
+  overlaying a minimal `modules.conf`, a `sofia.conf` including our SIP
+  profile, the intercom SIP profile + dialplan, and an open-mic conference
+  profile. The profile's bind IP is set explicitly via `FREESWITCH_BIND_IP`
+  (see `entrypoint.sh`) rather than FreeSWITCH's own `$${local_ip_v4}`
+  auto-detection — on a multi-homed host, that auto-detection can pick a
+  different interface than the one pbx-core is configured to dial, which
+  silently breaks every group call.
 
 ## Run it (podman-compose)
 ```bash
@@ -108,45 +96,58 @@ cp .env.example .env
 
 podman-compose up -d --build
 ```
-- Controller UI: `http://<host>:8080` — sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`.
+- Controller UI: `http://<host>:8080` — sign in with `ADMIN_EMAIL` /
+  `ADMIN_PASSWORD` from `.env`.
+- Turret: `http://<host>:8080/turret/` — **must be `localhost`** today (no
+  TLS yet, and `getUserMedia` needs a secure context).
 - Controller API: `http://<host>:3100/api/v1/...`
-- pbx-core SIP/WS: `<host>:8088` (matches container-sip-endpoint's default `register()` target), SIP UDP/TCP on `:5060`.
+- pbx-core SIP/WS: `<host>:8088`, SIP UDP/TCP on `:5060`.
 - Postgres: exposed on host `5433` for direct inspection if needed.
 
-`pbx-core` and `rtpengine` run with `network_mode: host` — this is required so
-rtpengine can anchor media reachably for endpoints on other subnets; it's not
-optional for the routed deployment you asked for.
+`pbx-core`, `rtpengine`, and `freeswitch` run with `network_mode: host` —
+required so rtpengine can anchor media reachably for endpoints on other
+subnets in a routed deployment.
 
-### Registering endpoints
-1. In the UI (or via `POST /api/v1/endpoints`), add each container-sip-endpoint
-   station: `name`, `aor` (e.g. `sip:1001@intercom.lab`), `rest_url` (e.g.
-   `http://192.168.1.20:3000`), `kind: station`.
-2. Point each container-sip-endpoint at pbx-core instead of Asterisk:
-   ```bash
-   curl -X POST http://<endpoint-host>:3000/api/register -H 'Content-Type: application/json' \
-     -d '{"server":"<pbx-core-host>","username":"1001","password":"x","transport":"WS","wsPort":8088,"wsPath":"/ws"}'
-   ```
-3. Apply `patches/endpoint-auto-answer.md` to `sipManager.js` and rebuild that
-   image so the callee auto-answers on the PBX's intercom header.
-4. In the console, click one jack (caller), shift-click another (callee),
-   **Start intercom call**.
+### Optional: the Health page's log viewer
+The console's Health page can show live logs from every container over the
+podman API socket. This needs one host-level prerequisite (rootless
+podman):
+```bash
+systemctl --user enable --now podman.socket
+```
+On SELinux-enforcing hosts (Fedora/RHEL), `controller-backend` also runs
+with `security_opt: label:disable` in `docker-compose.yml` — SELinux
+denies a confined container from connecting to the podman socket even with
+the file permissions otherwise correct, and no stock boolean covers that
+specific case. This widens that one container's blast radius (full
+control-plane visibility into every container on the host, not just this
+project's 6) — accepted deliberately for this lab; skip the log viewer
+entirely if you'd rather not take that tradeoff.
+
+### Setting up a turret
+1. Console → **Directory Users** panel → create a person (name, extension,
+   turret-login password), then add them a direct button (target
+   extension) and/or a group button.
+2. Open `http://localhost:8080/turret/`, log in with the extension +
+   turret password.
+3. Press a button — direct buttons auto-connect instantly (pbx-core's
+   auto-answer headers); group buttons join that group's FreeSWITCH
+   conference on whichever channel is currently armed (click an idle
+   Handset/Speaker strip to arm it before pressing a group button). Press
+   the same button again to hang up.
+4. Testing two turrets on **one machine**: use genuinely separate browser
+   contexts (an Incognito window, or a different browser) — duplicated
+   tabs share `sessionStorage` and will fight over the same login.
 
 ### Testing a group (open-mic)
-1. In the console's **Groups** panel, create a group (e.g. "Floor A", mode
-   *Talkback*). Its dial code defaults to a slug of the name (`floor-a`).
-2. Tick which endpoints are members. All are talking members by default.
-3. Click **Start "Floor A"** — the controller tells each talking member's own
-   endpoint to dial `*8floor-a`; pbx-core routes that to FreeSWITCH, which
-   joins them into the same conference room. Every unmuted member hears every
-   other one.
-4. To end it, find the session in the **Sessions** list and click **End**.
-
-### Using PTT (push-to-talk floor)
-Any active session (direct or group) expands in the **Sessions** list to show
-its participants. Each has a **Mute**/**Talk** toggle: **Mute** re-INVITEs that
-station's leg to `sendonly` (via its `/api/hold`) so it stops transmitting into
-the mix; **Talk** resumes it. Open-mic is simply the state where everyone is on
-**Talk**.
+1. Console → **Groups** panel → create a group (mode *Talkback* for
+   open-mic, *Announce* for one-way paging). Dial code defaults to a slug
+   of the name.
+2. Tick which endpoints/directory users are members via their button
+   assignments, or add a group button to a directory user directly.
+3. Have a turret press the group button — pbx-core routes `*8<dial_code>`
+   to FreeSWITCH, which joins every talking member into the same
+   conference. Everyone unmuted hears everyone else.
 
 ## Repo layout
 ```
@@ -155,38 +156,54 @@ docker-compose.yml          — full stack (this is what you run)
 pod.yaml                    — alternative: podman play kube (pbx-core+rtpengine only)
 migrations/                 — controller's numbered SQL migrations
 controller/
-  backend/                  — Express API (users, audit, endpoints, groups, health, sessions)
-  frontend/                 — patch-bay console (Vite/React, built + served by nginx)
-pbx-core/                   — drachtio SIP core + rtpengine wrapper + FreeSWITCH group routing
+  backend/                  — Express API: auth, endpoints, groups, intercom,
+                               directory users, turret login, system health/
+                               audit/logs, admin db backup/restore
+  frontend/                 — console (Vite/React, built + served by nginx) —
+                               its Containerfile also builds turret/ as a
+                               second stage, served at /turret/
+turret/                     — real-browser trading-turret softphone (Vite/
+                               React/TS): genuine getUserMedia/
+                               RTCPeerConnection, 2 Handsets + 1 Speaker +
+                               Intercom channel, directory-user login
+pbx-core/                   — drachtio SIP core: registrar, direct/group
+                               routing, rtpengine wrapper, admin status API
 images/
   rtpengine/                — rtpengine media relay image (Debian package, userspace mode)
-  freeswitch/               — group open-mic mixer image (FROM drachtio FS base + conf overlay)
+  freeswitch/                — group open-mic mixer image (FROM drachtio FS base + conf overlay)
 patches/
-  endpoint-auto-answer.md   — header-driven auto-answer patch for container-sip-endpoint
+  endpoint-auto-answer.md   — reference notes for the separate, unrelated
+                               container-sip-endpoint sibling project
 ```
 
 ## Notes / knobs
-- Registration and the controller's endpoint REST calls are unauthenticated
-  by default (lab prototype) — add SIP digest auth and endpoint-side API
-  tokens before this leaves the lab.
-- `HEALTH_INTERVAL_MS` / retention are env-configurable on controller-backend,
-  same pattern as Walk the Nxt Floor's `sipHealthService`.
-- Local dev without containers: `cd controller/backend && npm install && npm run dev`
-  needs `PGHOST`/`PGPORT` etc pointed at a reachable Postgres, and note
-  `migrate.ts`'s `MIGRATIONS_DIR` assumes the container layout (dist/ and
-  migrations/ both directly under the app root) — adjust the relative path if
-  running straight from `src/` in dev.
+- SIP registration is authless and the controller's endpoint REST calls are
+  unauthenticated by default (lab prototype) — add SIP digest auth and
+  endpoint-side API tokens before this leaves the lab.
+- No TLS anywhere — the turret only works via `localhost`. A real remote
+  desk needs TLS in front of both the console/turret page origin and
+  pbx-core's SIP/WS connection (`ws://` → `wss://`).
+- `HEALTH_INTERVAL_MS` / retention are env-configurable on
+  `controller-backend`, same pattern as Walk the Nxt Floor's
+  `sipHealthService`.
+- Local dev without containers: `cd controller/backend && npm install &&
+  npm run dev` needs `PGHOST`/`PGPORT` etc pointed at a reachable Postgres;
+  note `migrate.ts`'s `MIGRATIONS_DIR` assumes the container layout —
+  adjust the relative path if running straight from `src/`.
 
 ## Roadmap
-- **First-boot verification** of the two locally-built media images — see the
-  "Media images are built locally" checks above.
-- **Announce-zone listen-only members** — `can_talk: false` members aren't
-  dialled out yet (only talkers are); wire that in once you have a live-mic
-  handset that actually needs to *receive* group audio without transmitting.
-- **API keys for machine clients** (mirroring Walk the Nxt Floor's
-  `apiKeyService`), **WebSocket live session/log streaming** in the console,
-  **SIP digest auth** on pbx-core and the FreeSWITCH profile before this
-  leaves the lab.
-- **Moderator-forced mute** — if you need to mute a participant regardless of
-  that endpoint's cooperation, that's when ESL/drachtio-fsmrf floor control
-  becomes worth adding (see the PTT note above).
+- **Turret reachable from a real remote desk** — needs TLS (see above), a
+  real infra project, not a config tweak.
+- **Handset A/B repurposed for real SIP extensions on an external PBX** —
+  a shared-line-appearance pattern (global `lines`, many-to-many
+  assignment to directory users, "capture" pickup from the turret UI).
+  Large future scope, detailed design notes in `CLAUDE.md`, not yet
+  designed in full.
+- **Announce-zone listen-only members** aren't dialled out yet (only
+  talkers are).
+- **API keys, WebSocket live session streaming, SIP digest auth** — none
+  built yet.
+- A turret joining a group call via its Speaker channel specifically
+  (each half — turret↔turret and turret-in-group — verified
+  independently, not yet together), and 3 simultaneous channels active at
+  once on one turret, haven't been explicitly exercised.

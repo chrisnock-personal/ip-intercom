@@ -41,10 +41,14 @@ router.get('/sessions', async (req, res, next) => {
   try {
     const { rows } = await query(
       `SELECT s.*,
-              i.name AS initiator_name, t.name AS target_name, g.name AS group_name
+              COALESCE(i.name, di.name) AS initiator_name,
+              COALESCE(t.name, dt.name) AS target_name,
+              g.name AS group_name
        FROM intercom_sessions s
        LEFT JOIN intercom_endpoints i ON i.id = s.initiator_endpoint_id
        LEFT JOIN intercom_endpoints t ON t.id = s.target_endpoint_id
+       LEFT JOIN intercom_directory_users di ON di.id = s.initiator_directory_user_id
+       LEFT JOIN intercom_directory_users dt ON dt.id = s.target_directory_user_id
        LEFT JOIN intercom_groups    g ON g.id = s.group_id
        ORDER BY s.started_at DESC LIMIT 200`);
     res.json(rows);

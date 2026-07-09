@@ -62,4 +62,15 @@ export const api = {
     return req('/logout', { method: 'POST' }).catch(() => {});
   },
   isLoggedIn() { return !!token; },
+
+  reportCallEvent(evt: {
+    type: 'start' | 'end'; clientCallId: string;
+    kind?: 'direct' | 'group'; direction?: 'outgoing' | 'incoming';
+    counterpartExtension?: string; reason?: string;
+  }) {
+    return req('/call-events', {
+      method: 'POST',
+      body: JSON.stringify({ event: evt.type, ...evt }),
+    });
+  },
 };

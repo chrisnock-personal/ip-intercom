@@ -22,6 +22,16 @@ controller-frontend (nginx: console + /turret/)  ──/api/v1──▶ controll
 Six compose services: `postgres`, `controller-backend`, `controller-frontend`
 (also serves the turret at `/turret/`), `pbx-core`, `rtpengine`, `freeswitch`.
 
+## Screenshots
+<img width="806" height="709" alt="Image" src="https://github.com/user-attachments/assets/8303f000-b91e-44af-9d4f-048e5aab5b8f" />
+<br>
+<img width="1169" height="959" alt="Image" src="https://github.com/user-attachments/assets/5ff5b03c-87df-4565-b258-da077731dd2f" /><br>
+<img width="1169" height="959" alt="Image" src="https://github.com/user-attachments/assets/1380e9f6-4454-46c2-8348-d31b81dd0813" /><br>
+<img width="1169" height="959" alt="Image" src="https://github.com/user-attachments/assets/78be5a90-a6b2-4580-9e5a-92e42d4a4555"/><br>
+<img width="1174" height="896" alt="Image" src="https://github.com/user-attachments/assets/08cc2e70-3216-43cd-baeb-8fe4c050febc" /><br>
+
+```
+
 ## What's implemented
 
 ### Calling
